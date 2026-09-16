@@ -27,6 +27,7 @@ opencode providers
 
 Then install and enable this repository:
 
+```bash
 omarchy plugin add https://github.com/FelipeMayerDev/OmarchyAiMenu.git --enable
 ```
 
