@@ -13,6 +13,30 @@ import uuid
 TIMEOUT = 60
 MODELS_DEV = os.path.expanduser("~/.cache/omarchy-ai-menu/models-dev.json")
 
+# Sent along whenever the harness runs with command execution allowed, so the
+# model knows it can act on the machine instead of only giving advice.
+SYSTEM_BRIEF = (
+    "You are the Omarchy AI assistant, running on the user's own Omarchy "
+    "machine (Arch Linux with the Hyprland desktop), with permission to run "
+    "shell commands. When asked to do something on the system, actually do it. "
+    "To open a graphical app, launch it detached so the call returns "
+    "immediately: `nohup <app> >/dev/null 2>&1 &` or "
+    "`systemd-run --user --scope <app>`; prefer `gtk-launch <desktop-id>` "
+    "when a .desktop entry exists. Never block on a GUI process. To show the "
+    "user an image or screenshot in the chat, write its absolute path on a "
+    "line by itself; the UI renders it inline. Never say you cannot attach "
+    "or display images.\n\n"
+)
+
+# Computer-use skill: append it so the model can see and drive the desktop
+# in YOLO mode (SYSTEM_BRIEF is only sent when tools are enabled).
+try:
+    skill = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "..", "skills", "computer-use", "SKILL.md")
+    SYSTEM_BRIEF += open(skill).read().strip() + "\n\n"
+except OSError:
+    pass
+
 
 def emit(session, text):
     if text:
@@ -30,6 +54,25 @@ def emit_usage(session, used, limit):
     if used:
         print(json.dumps({"type": "usage", "sessionID": session,
                           "part": {"used": used, "limit": limit}}, separators=(",", ":")), flush=True)
+
+
+_real_emitters = (emit, emit_thinking)
+
+
+def _make_kicking_emitters(kick):
+    real_emit, real_thinking = _real_emitters
+
+    def emit_kick(session, text):
+        if text:
+            kick()
+            real_emit(session, text)
+
+    def thinking_kick(session, text):
+        if text:
+            kick()
+            real_thinking(session, text)
+
+    return emit_kick, thinking_kick
 
 
 # Janela de contexto do modelo via models.dev (mesma fonte que o opencode
@@ -69,12 +112,13 @@ def command(harness, model, effort, session, prompt, yolo):
             args += ["-s", sandbox]
         if effort != "default":
             args += ["-c", f'model_reasoning_effort="{effort}"']
-        return args + [prompt], None
+        return args + [SYSTEM_BRIEF + prompt], None
     if harness == "claude":
         args = ["claude", "-p", "--output-format", "stream-json", "--verbose",
                 "--include-partial-messages", "--model", model]
         if yolo:
-            args += ["--dangerously-skip-permissions"]
+            args += ["--dangerously-skip-permissions",
+                     "--append-system-prompt", SYSTEM_BRIEF.strip()]
         else:
             args += ["--restricted", "--tools", ""]
         if effort != "default":
@@ -94,7 +138,7 @@ def command(harness, model, effort, session, prompt, yolo):
             args += ["--thinking", effort]
         if session:
             args += ["--resume", session]
-        return args + [prompt], None
+        return args + [SYSTEM_BRIEF + prompt], None
     raise ValueError("unsupported harness")
 
 
@@ -220,8 +264,18 @@ def run_cli(harness, model, effort, session, prompt, yolo):
         timed_out = True
         process.kill()
 
-    watchdog = threading.Timer(TIMEOUT, kill)
-    watchdog.start()
+    # TIMEOUT is an idle limit: while the model streams thinking or text the
+    # watchdog keeps resetting, so long reasoning phases are not cut off.
+    watchdog = [threading.Timer(TIMEOUT, kill)]
+
+    def kick():
+        watchdog[0].cancel()
+        watchdog[0] = threading.Timer(TIMEOUT, kill)
+        watchdog[0].start()
+
+    global emit, emit_thinking
+    emit, emit_thinking = _make_kicking_emitters(kick)
+    watchdog[0].start()
     session_id = [session]
     state = {"emitted": False, "used": 0, "limit": 0}
     handler = HANDLERS[harness](session_id, state)
@@ -229,7 +283,8 @@ def run_cli(harness, model, effort, session, prompt, yolo):
     for line in process.stdout:
         raw.append(line)
         handler(line)
-    watchdog.cancel()
+    emit, emit_thinking = _real_emitters
+    watchdog[0].cancel()
     process.wait()
     if timed_out:
         raise SystemExit(124)
@@ -264,8 +319,14 @@ def opencode_main(model, effort, session, prompt, yolo):
         timed_out = True
         server.kill()
 
-    watchdog = threading.Timer(TIMEOUT, kill)
-    watchdog.start()
+    watchdog = [threading.Timer(TIMEOUT, kill)]
+
+    def kick():
+        watchdog[0].cancel()
+        watchdog[0] = threading.Timer(TIMEOUT, kill)
+        watchdog[0].start()
+
+    watchdog[0].start()
     debug = open("/tmp/airun-debug.log", "w")
 
     def log(message):
@@ -303,14 +364,17 @@ def opencode_main(model, effort, session, prompt, yolo):
 
         def poster():
             provider, _, model_id = model.partition("/")
+            user_prompt = SYSTEM_BRIEF + prompt if yolo else prompt
             body = json.dumps({"providerID": provider or "opencode", "modelID": model_id or model,
                                "agent": "omarchy-help",
-                               "parts": [{"type": "text", "text": prompt}]}).encode()
+                               "parts": [{"type": "text", "text": user_prompt}]}).encode()
             request = urllib.request.Request(base + "/session/%s/message" % sid, data=body,
                                              headers={"Content-Type": "application/json"},
                                              method="POST")
             try:
-                urllib.request.urlopen(request, timeout=TIMEOUT).read()
+                # The POST returns only when the whole run is done; a long
+                # reasoning phase must not be mistaken for a dead server.
+                urllib.request.urlopen(request, timeout=900).read()
                 log("post done")
             except Exception as error:
                 body_text = error.read().decode(errors="replace") if hasattr(error, "read") else str(error)
@@ -332,17 +396,33 @@ def opencode_main(model, effort, session, prompt, yolo):
                     state["emitted"] = True
                 emit_fn(sid, text[sent:])
 
-        events = urllib.request.urlopen(base + "/event", timeout=3)
-        log("sse open")
+        events = None
         poster_thread = threading.Thread(target=poster, daemon=True)
         poster_thread.start()
         deltas = 0
         part_kinds = {}
         while poster_thread.is_alive():
+            # A read timeout poisons the response object ("cannot read from
+            # timed out object"), so reopen the stream instead of retrying on
+            # a dead socket. Events missed mid-gap are covered by the final
+            # message fetch below.
+            if events is None:
+                try:
+                    events = urllib.request.urlopen(base + "/event", timeout=30)
+                    log("sse open")
+                except Exception as error:
+                    log("sse connect wait %r" % (error,))
+                    time.sleep(0.2)
+                    continue
             try:
                 line = events.readline().decode(errors="replace").strip()
             except Exception as error:
-                log("sse read error %r" % (error,))
+                log("sse reconnect %r" % (error,))
+                try:
+                    events.close()
+                except Exception:
+                    pass
+                events = None
                 continue
             if not line.startswith("data:"):
                 continue
@@ -367,6 +447,7 @@ def opencode_main(model, effort, session, prompt, yolo):
             part_kind = part_kinds.get(key, "text")
             delta = properties.get("delta") or ""
             if delta:
+                kick()
                 deltas += 1
                 if deltas == 1:
                     log("first delta part=%s kind=%s" % (str(key)[-6:], part_kind))
@@ -406,7 +487,7 @@ def opencode_main(model, effort, session, prompt, yolo):
                 sys.stderr.write(failure[0])
             raise SystemExit(1)
     finally:
-        watchdog.cancel()
+        watchdog[0].cancel()
         server.terminate()
         try:
             server.wait(2)

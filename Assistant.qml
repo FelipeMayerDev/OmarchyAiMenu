@@ -206,11 +206,15 @@ Item {
     error = ""
     input.text = ""
 
-    var prompt = "Answer this Omarchy Linux question concisely in Markdown. Use fenced code blocks for code. "
+    var prompt = "You are the Omarchy AI assistant with shell access to this machine. "
+      + "If the request is an action (open an app, change a setting, install something), "
+      + (root.yolo ? "perform it with tools now" : "say you need YOLO mode enabled to perform it")
+      + " instead of explaining how. "
+      + "Answer questions concisely in Markdown. Use fenced code blocks for code. "
       + "When useful, finish with 2-4 short suggested replies as Markdown links using choice: URLs, "
       + "for example [Yes](choice:Yes). Percent-encode spaces. "
-      + (root.yolo ? "You may use tools when needed. " : "Do not use tools. ")
-      + "Question: " + text
+      + (root.yolo ? "Tools are enabled. " : "Tools are disabled. ")
+      + "Request: " + text
     process.command = [Quickshell.env("HOME") + "/.config/omarchy/plugins/focky.ai-menu/bin/ai-run",
       harness, model, effort, sessionId, root.yolo ? "on" : "off", prompt]
     waiting = true
@@ -219,9 +223,18 @@ Item {
     Qt.callLater(function() { list.positionViewAtEnd() })
   }
 
+  function imageUrl(path) {
+    var value = String(path || "")
+    if (value.indexOf("file://") === 0) return value
+    if (value.indexOf("~/") === 0) value = Quickshell.env("HOME") + value.substring(1)
+    return "file://" + value
+  }
+
   function consume(line) {
     var event = OpenCodeEvent.parse(line)
     if (assistantIndex < 0) return
+    // The timeout is an idle limit: real output (thinking or text) renews it.
+    if (event.thinking || event.text) timeout.restart()
     if (event.used) {
       contextUsed = event.used
       if (event.limit > 0) contextLimit = event.limit
@@ -535,7 +548,45 @@ Item {
                   delegate: Item {
                     required property var modelData
                     width: messageColumn.width
-                    height: modelData.kind === "code" ? codeBox.implicitHeight : prose.implicitHeight
+                    height: modelData.kind === "code" ? codeBox.implicitHeight
+                      : modelData.kind === "image" ? imageWrap.height : prose.implicitHeight
+
+                    Item {
+                      id: imageWrap
+                      visible: modelData.kind === "image"
+                      width: parent.width
+                      height: visible && imageItem.status === Image.Ready
+                        ? frame.height + Style.spacing.sm : 60
+
+                      BorderSurface {
+                        id: frame
+                        anchors.centerIn: parent
+                        width: imageItem.width + Style.spacing.md
+                        height: imageItem.height + Style.spacing.md
+                        color: root.selectedBackground
+                        borderSpec: root.borderSpec
+                        radius: Style.cornerRadius
+
+                        Image {
+                          id: imageItem
+                          anchors.centerIn: parent
+                          visible: modelData.kind === "image"
+                          width: Math.min(imageWrap.width - Style.spacing.md,
+                                          320 * implicitWidth / Math.max(implicitHeight, 1))
+                          height: width * implicitHeight / Math.max(implicitWidth, 1)
+                          source: modelData.kind === "image" ? root.imageUrl(modelData.path) : ""
+                          fillMode: Image.PreserveAspectFit
+                          asynchronous: true
+
+                          MouseArea {
+                            anchors.fill: parent
+                            enabled: imageItem.status === Image.Ready
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: Qt.openUrlExternally(root.imageUrl(modelData.path))
+                          }
+                        }
+                      }
+                    }
 
                     Text {
                       id: prose

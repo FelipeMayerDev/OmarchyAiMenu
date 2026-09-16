@@ -38,24 +38,64 @@ function withoutChoices(text) {
     .trim()
 }
 
+function isImagePath(token) {
+  return /^(file:\/\/|~\/|\/).+\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(String(token || "").trim())
+}
+
+// Markdown blocks keep growing while the answer streams, so image references
+// only become renderable blocks once their path is complete.
+function pushMarkdown(result, text) {
+  var value = String(text || "")
+  var pattern = /!\[([^\]]*)\]\(([^)]+)\)/g
+  var index = 0
+  var match
+  while ((match = pattern.exec(value)) !== null) {
+    if (isImagePath(match[2])) {
+      if (match.index > index)
+        result.push({ kind: "markdown", text: value.substring(index, match.index) })
+      result.push({ kind: "image", path: match[2].trim(), label: match[1] })
+      index = pattern.lastIndex
+    }
+  }
+  if (index < value.length) result.push({ kind: "markdown", text: value.substring(index) })
+}
+
 function blocks(text) {
   var value = withoutChoices(text)
-  var result = []
+  var split = []
   var pattern = /```([^\n`]*)\n?([\s\S]*?)(?:```|$)/g
   var index = 0
   var match
   while ((match = pattern.exec(value)) !== null) {
     if (match.index > index)
-      result.push({ kind: "markdown", text: value.substring(index, match.index) })
-    result.push({
+      split.push({ kind: "markdown", text: value.substring(index, match.index) })
+    split.push({
       kind: "code",
       language: String(match[1] || "code").trim() || "code",
       text: String(match[2] || "").replace(/\n$/, "")
     })
     index = pattern.lastIndex
   }
-  if (index < value.length) result.push({ kind: "markdown", text: value.substring(index) })
-  if (result.length === 0) result.push({ kind: "markdown", text: value })
+  if (index < value.length) split.push({ kind: "markdown", text: value.substring(index) })
+  if (split.length === 0) split.push({ kind: "markdown", text: value })
+
+  var result = []
+  for (var i = 0; i < split.length; i++) {
+    var block = split[i]
+    if (block.kind !== "markdown") { result.push(block); continue }
+    var lines = String(block.text).split("\n")
+    var buffer = ""
+    for (var j = 0; j < lines.length; j++) {
+      if (isImagePath(lines[j])) {
+        pushMarkdown(result, buffer)
+        buffer = ""
+        result.push({ kind: "image", path: lines[j].trim(), label: "" })
+      } else {
+        buffer += (buffer ? "\n" : "") + lines[j]
+      }
+    }
+    pushMarkdown(result, buffer)
+  }
   return result
 }
 
