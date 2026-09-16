@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+NAMES = {"opencode": "OpenCode", "codex": "Codex", "claude": "Claude", "omp": "OMP"}
+STATE = Path.home() / ".local/state/omarchy-ai-menu/settings.json"
+
+
+def emit(value):
+    print(json.dumps(value, separators=(",", ":")))
+
+
+def run(*args):
+    return subprocess.run(args, text=True, capture_output=True, timeout=30, check=True).stdout
+
+
+def detected():
+    return [{"value": key, "label": label, "available": True}
+            for key, label in NAMES.items() if shutil.which(key)]
+
+
+def opencode_models():
+    return [{"value": value, "label": value, "efforts": ["default"], "defaultEffort": "default"}
+            for value in run("opencode", "models").splitlines() if value.strip()]
+
+
+def codex_models():
+    data = json.loads((Path.home() / ".codex/models_cache.json").read_text())
+    result = []
+    for model in data.get("models", []):
+        efforts = [item["effort"] for item in model.get("supported_reasoning_levels", [])]
+        result.append({"value": model["slug"], "label": model["slug"],
+                       "efforts": efforts or ["default"],
+                       "defaultEffort": model.get("default_reasoning_level", efforts[0] if efforts else "default")})
+    return result
+
+
+def claude_models():
+    files = glob.glob(str(Path.home() / ".claude/cache/model-catalog/*.json"))
+    path = max(files, key=os.path.getmtime)
+    models = json.loads(Path(path).read_text()).get("catalog", {}).get("config", {}).get("models", [])
+    result = []
+    for model in models:
+        options = model.get("thinking", {}).get("effort_options", [])
+        efforts = [item["id"] for item in options]
+        default = next((item["id"] for item in options if item.get("badge", {}).get("message") == "Default"), None)
+        result.append({"value": model["id"], "label": model.get("name", model["id"]),
+                       "efforts": efforts or ["default"], "defaultEffort": default or (efforts[0] if efforts else "default")})
+    return result
+
+
+def omp_models():
+    data = json.loads(run("omp", "models", "--json"))
+    seen, result = set(), []
+    for model in data.get("models", []):
+        selector = model.get("selector")
+        if not selector or selector in seen:
+            continue
+        seen.add(selector)
+        efforts = model.get("thinking") or ["default"]
+        result.append({"value": selector,
+                       "label": f"{model.get('name', selector)} · {model.get('provider', '')}",
+                       "efforts": efforts, "defaultEffort": "medium" if "medium" in efforts else efforts[0]})
+    return result
+
+
+def settings():
+    try:
+        value = json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        value = {}
+    return {"harness": value.get("harness", "opencode"),
+            "model": value.get("model", "opencode/ling-3.0-flash-fin-free"),
+            "effort": value.get("effort", "default"),
+            "yolo": bool(value.get("yolo", False))}
+
+
+def main():
+    action = sys.argv[1] if len(sys.argv) > 1 else "detect"
+    if action == "detect":
+        emit({"harnesses": detected(), "settings": settings()})
+    elif action == "models" and len(sys.argv) == 3:
+        harness = sys.argv[2]
+        if harness not in NAMES or not shutil.which(harness):
+            emit({"models": [], "error": f"{NAMES.get(harness, harness)} is not installed"})
+            return
+        try:
+            models = {"opencode": opencode_models, "codex": codex_models,
+                      "claude": claude_models, "omp": omp_models}[harness]()
+            emit({"models": models})
+        except Exception as error:
+            emit({"models": [], "error": str(error)})
+    elif action == "save" and len(sys.argv) == 6:
+        harness, model, effort, yolo = sys.argv[2:]
+        if harness not in NAMES:
+            raise SystemExit("invalid harness")
+        if yolo not in ("on", "off"):
+            raise SystemExit("invalid yolo")
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = STATE.with_suffix(".tmp")
+        temporary.write_text(json.dumps({"harness": harness, "model": model, "effort": effort,
+                                         "yolo": yolo == "on"}) + "\n")
+        temporary.replace(STATE)
+    else:
+        raise SystemExit("usage: harness-info detect | models HARNESS | save HARNESS MODEL EFFORT")
+
+
+if __name__ == "__main__":
+    main()

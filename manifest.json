@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "focky.ai-menu",
+  "name": "AI Assistant",
+  "version": "0.6.0",
+  "author": "Focky",
+  "license": "MIT",
+  "description": "A standalone multi-harness AI assistant overlay.",
+  "kinds": [
+    "overlay",
+    "bar-widget"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Assistant.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "AI Assistant",
+    "description": "Opens the AI assistant overlay.",
+    "category": "AI",
+    "allowMultiple": false
+  }
+}
