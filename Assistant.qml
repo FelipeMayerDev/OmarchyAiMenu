@@ -31,6 +31,7 @@ Item {
   property var efforts: ["default"]
   property bool catalogLoading: false
   property string settingsError: ""
+  property string pendingSelectCopy: ""
 
   property color background: Color.menu.background
   readonly property color solidBackground: Qt.rgba(background.r, background.g, background.b, 1)
@@ -265,9 +266,16 @@ Item {
     Quickshell.execDetached(["notify-send", "-a", "AI Assistant", harnessName() + " · resposta pronta", text])
   }
 
-  function copyCode(text) {
+  function copyText(text) {
     Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(text) + " | wl-copy"])
   }
+
+  function scheduleSelectCopy(text) {
+    pendingSelectCopy = String(text || "")
+    if (pendingSelectCopy.length > 0) selectCopyTimer.restart()
+  }
+
+  function copyCode(text) { root.copyText(text) }
   function finish(exitCode) {
     if (!waiting) return
     waiting = false
@@ -331,6 +339,16 @@ Item {
     interval: 260
     onTriggered: {
       root.opened = false
+    }
+  }
+  Timer {
+    id: selectCopyTimer
+    interval: 220
+    onTriggered: {
+      if (Qt.mouseButtons.pressed) { selectCopyTimer.restart(); return }
+      var text = root.pendingSelectCopy
+      root.pendingSelectCopy = ""
+      if (text !== "") root.copyText(text)
     }
   }
 
@@ -513,19 +531,30 @@ Item {
                 font.weight: Font.DemiBold
               }
 
-              Text {
+              TextEdit {
                 id: thinkingText
                 visible: speaker === "AI" && thinking !== ""
                 width: parent.width
-                textFormat: Text.PlainText
+                height: contentHeight
+                readOnly: true
+                selectByMouse: true
+                selectByKeyboard: false
+                persistentSelection: true
+                activeFocusOnPress: false
+                cursorVisible: false
+                textMargin: 0
+                selectionColor: Style.selectionFillFor(root.foreground, root.selectedBorder)
+                selectedTextColor: Style.selectionStateColor(root.foreground, root.selectedBorder)
+                textFormat: TextEdit.PlainText
                 text: thinking
                 color: root.foreground
                 opacity: 0.5 * thinkingPulse
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 font.italic: true
-                wrapMode: Text.Wrap
+                wrapMode: TextEdit.Wrap
                 property real thinkingPulse: 1
+                onSelectedTextChanged: function() { root.scheduleSelectCopy(selectedText) }
 
                 SequentialAnimation {
                   running: root.waiting && speaker === "AI"
@@ -549,7 +578,7 @@ Item {
                     required property var modelData
                     width: messageColumn.width
                     height: modelData.kind === "code" ? codeBox.implicitHeight
-                      : modelData.kind === "image" ? imageWrap.height : prose.implicitHeight
+                      : modelData.kind === "image" ? imageWrap.height : prose.contentHeight
 
                     Item {
                       id: imageWrap
@@ -588,18 +617,28 @@ Item {
                       }
                     }
 
-                    Text {
+                    TextEdit {
                       id: prose
                       visible: modelData.kind !== "code"
                       width: parent.width
+                      height: contentHeight
                       opacity: bubble.pendingDots ? 0.45 * bubble.dotPulse : 1
                       text: modelData.text || "…"
-                      textFormat: speaker === "AI" ? Text.MarkdownText : Text.PlainText
+                      textFormat: speaker === "AI" ? TextEdit.MarkdownText : TextEdit.PlainText
                       color: root.foreground
-                      linkColor: root.selectedBorder
+                      readOnly: true
+                      selectByMouse: true
+                      selectByKeyboard: false
+                      persistentSelection: true
+                      activeFocusOnPress: false
+                      cursorVisible: false
+                      textMargin: 0
+                      selectionColor: Style.selectionFillFor(root.foreground, root.selectedBorder)
+                      selectedTextColor: Style.selectionStateColor(root.foreground, root.selectedBorder)
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
-                      wrapMode: Text.Wrap
+                      wrapMode: TextEdit.Wrap
+                      onSelectedTextChanged: function() { root.scheduleSelectCopy(selectedText) }
                       onLinkActivated: function(link) { root.activateLink(link) }
                     }
 
@@ -648,14 +687,25 @@ Item {
                           }
                         }
 
-                        Text {
+                        TextEdit {
                           width: parent.width
-                          textFormat: Text.PlainText
+                          height: contentHeight
+                          textFormat: TextEdit.PlainText
                           text: modelData.text
                           color: root.foreground
+                          readOnly: true
+                          selectByMouse: true
+                          selectByKeyboard: false
+                          persistentSelection: true
+                          activeFocusOnPress: false
+                          cursorVisible: false
+                          textMargin: 0
                           font.family: Style.fontFamily
                           font.pixelSize: Style.font.bodySmall
-                          wrapMode: Text.WrapAnywhere
+                          wrapMode: TextEdit.WrapAnywhere
+                          selectionColor: Style.selectionFillFor(root.foreground, root.selectedBorder)
+                          selectedTextColor: Style.selectionStateColor(root.foreground, root.selectedBorder)
+                          onSelectedTextChanged: function() { root.scheduleSelectCopy(selectedText) }
                         }
                       }
                     }
